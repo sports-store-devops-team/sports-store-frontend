@@ -20,6 +20,13 @@ docker run --rm -p 8081:80 sports-store/frontend:0.1.0
 
 Direct navigation to React Router paths is handled by the frontend NGINX fallback. This container intentionally does not proxy `/api`.
 
+## Observability
+
+NGINX writes minimal one-line JSON access logs to stdout without URLs, query
+strings, headers, cookies, or bodies. A loopback-only `stub_status` listener is
+available to the Kubernetes exporter sidecar; it is not part of the image's
+public port or routes.
+
 ## Continuous integration
 
 Pull requests targeting `main` run dependency installation, the production build, and a non-publishing container build. No test command is invented because this repository currently has no test script. Pushes to `main` repeat validation, authenticate to AWS through GitHub OIDC, and publish exactly one immutable ECR image tagged `<VERSION>-<7-character-git-hash>`.
