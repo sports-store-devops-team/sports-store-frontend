@@ -31,6 +31,8 @@ export default function ProductList() {
     if (category) query.set('category', category)
     if (gender) query.set('gender', gender)
     if (search) query.set('q', search)
+    // Query changes intentionally reset the visible request state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true)
     apiFetch(`/products?${query}`)
       .then((data) => {
