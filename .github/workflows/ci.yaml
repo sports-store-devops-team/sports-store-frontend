@@ -15,6 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # Local CI validation image only; production frontend publication uses S3.
   ECR_REPOSITORY: sports-store-frontend
 
 jobs:
@@ -71,7 +72,7 @@ jobs:
           ignore-unfixed: true
           exit-code: 1
 
-  publish:
+  publish-static-site:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: validate
     runs-on: ubuntu-24.04
@@ -82,54 +83,56 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v5
 
-      - name: Validate configuration and compute image tag
-        id: metadata
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Validate static publication configuration
         env:
           AWS_REGION: ${{ vars.AWS_REGION }}
-          AWS_ECR_PUBLISH_ROLE_ARN: ${{ vars.AWS_ECR_PUBLISH_ROLE_ARN }}
+          AWS_STATIC_SITE_ROLE_ARN: ${{ vars.AWS_STATIC_SITE_ROLE_ARN }}
+          AWS_STATIC_SITE_BUCKET: ${{ vars.AWS_STATIC_SITE_BUCKET }}
         shell: bash
         run: |
           set -euo pipefail
-          [[ -n "${AWS_REGION}" ]] || { echo "::error::Required Actions variable AWS_REGION is empty."; exit 1; }
-          [[ -n "${AWS_ECR_PUBLISH_ROLE_ARN}" ]] || { echo "::error::Required Actions variable AWS_ECR_PUBLISH_ROLE_ARN is empty."; exit 1; }
-          mapfile -t version_lines < VERSION
-          [[ ${#version_lines[@]} -eq 1 ]] || { echo "::error::VERSION must contain exactly one line."; exit 1; }
-          version="$(printf '%s' "${version_lines[0]%$'\r'}" | sed 's/[[:space:]]*$//')"
-          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::VERSION must use MAJOR.MINOR.PATCH."; exit 1; }
-          short_sha="${GITHUB_SHA:0:7}"
-          image_tag="${version}-${short_sha}"
-          [[ "${image_tag}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{7}$ ]] || { echo "::error::Computed image tag is invalid."; exit 1; }
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "short_sha=${short_sha}" >> "${GITHUB_OUTPUT}"
-          echo "image_tag=${image_tag}" >> "${GITHUB_OUTPUT}"
+          [[ "${AWS_REGION}" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]] || { echo "::error::Required Actions variable AWS_REGION is absent or malformed."; exit 1; }
+          [[ "${AWS_STATIC_SITE_ROLE_ARN}" =~ ^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$ ]] || { echo "::error::Required Actions variable AWS_STATIC_SITE_ROLE_ARN is absent or malformed."; exit 1; }
+          [[ "${AWS_STATIC_SITE_BUCKET}" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || { echo "::error::Required Actions variable AWS_STATIC_SITE_BUCKET is absent or malformed."; exit 1; }
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build production static site
+        run: npm run build
 
       - name: Configure AWS credentials through OIDC
         uses: aws-actions/configure-aws-credentials@v5
         with:
           aws-region: ${{ vars.AWS_REGION }}
-          role-to-assume: ${{ vars.AWS_ECR_PUBLISH_ROLE_ARN }}
-          role-session-name: sports-store-frontend-ci
+          role-to-assume: ${{ vars.AWS_STATIC_SITE_ROLE_ARN }}
+          role-session-name: sports-store-frontend-static-publish
 
-      - name: Log in to Amazon ECR
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and publish immutable image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.metadata.outputs.image_tag }}
+      - name: Publish frontend with cache-safe headers
+        env:
+          AWS_STATIC_SITE_BUCKET: ${{ vars.AWS_STATIC_SITE_BUCKET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws s3 sync dist/ "s3://${AWS_STATIC_SITE_BUCKET}/" \
+            --delete \
+            --exclude 'assets/*' \
+            --cache-control 'no-cache'
+          aws s3 sync dist/assets/ "s3://${AWS_STATIC_SITE_BUCKET}/assets/" \
+            --delete \
+            --cache-control 'public,max-age=31536000,immutable'
 
       - name: Add publication summary
-        env:
-          IMAGE_TAG: ${{ steps.metadata.outputs.image_tag }}
         run: |
           {
-            echo "### Published image"
-            echo "- Repository: \`${ECR_REPOSITORY}\`"
-            echo "- Immutable tag: \`${IMAGE_TAG}\`"
+            echo "### Published static frontend"
+            echo "- Hashed assets use immutable one-year caching."
+            echo "- HTML and other entry files use no-cache."
           } >> "${GITHUB_STEP_SUMMARY}"

@@ -1,6 +1,6 @@
 # Sports Store Frontend
 
-React/Vite storefront. In production, this repository builds independently and an NGINX container serves the generated `dist` files on port `80` with SPA fallback to `index.html`. The frontend uses same-origin `/api` URLs; API proxying belongs to the separate gateway.
+React/Vite storefront. In AWS production, the validated `main` workflow publishes `dist/` to a private Terraform-managed S3 bucket and CloudFront serves it through signed Origin Access Control requests. S3 is the source origin, not a backup. The frontend uses same-origin `/api` URLs, which CloudFront sends to the ALB without API caching.
 
 ## Development
 
@@ -18,7 +18,7 @@ docker build -t sports-store/frontend:0.1.0 .
 docker run --rm -p 8081:80 sports-store/frontend:0.1.0
 ```
 
-Direct navigation to React Router paths is handled by the frontend NGINX fallback. This container intentionally does not proxy `/api`.
+The NGINX container remains supported for local development, Minikube, Docker Compose, and CI validation. Direct local navigation uses its SPA fallback; in AWS, a CloudFront Function performs the equivalent extensionless-route rewrite. The container intentionally does not proxy `/api`.
 
 ## Observability
 
@@ -29,6 +29,6 @@ public port or routes.
 
 ## Continuous integration
 
-Pull requests targeting `main` run dependency installation, the production build, and a non-publishing container build. No test command is invented because this repository currently has no test script. Pushes to `main` repeat validation, authenticate to AWS through GitHub OIDC, and publish exactly one immutable ECR image tagged `<VERSION>-<7-character-git-hash>`.
+Pull requests targeting `main` run clean dependency installation, ESLint, Vitest, a production build, Dockerfile lint, a non-publishing container build, and pinned filesystem/image Trivy scans. Pushes to `main` repeat validation, authenticate through GitHub OIDC, rebuild, and synchronize the result to the exact private bucket. Stale objects are deleted, hashed `/assets/*` receive immutable one-year caching, and `index.html` plus other entry files use `no-cache`; no CloudFront invalidation is required.
 
-`VERSION` is the semantic-version source and is changed deliberately through a pull request. Configure the Actions variables `AWS_REGION` and `AWS_ECR_PUBLISH_ROLE_ARN` at repository or organization scope. The role ARN is configuration, not a secret; no static AWS credentials are stored. CI publishes only to ECR and does not deploy to EKS. Deployment is handled later through Argo CD.
+Configure `AWS_REGION`, `AWS_STATIC_SITE_ROLE_ARN`, and `AWS_STATIC_SITE_BUCKET` as Actions variables. The role ARN and bucket name are non-secret configuration; no static AWS keys are stored. Publication runs only for a push to `main`, never for a pull request, dispatch, or `NivBranch`. The first `main` run can fail before base Terraform creates the bucket and role; `deploy.sh` configures the variables and performs the controlled rerun. The AWS frontend Pod is intentionally disabled, while container validation remains part of CI.
